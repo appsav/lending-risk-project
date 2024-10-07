@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+	
 
 import pandas as pd
 import torch
@@ -18,9 +18,9 @@ warnings.filterwarnings('ignore')
 ####============== Data Exploration ==============####
 ####==============================================####
 
-def print_records(_id, dataset):
+def print_records(dataset):
 	print("============================================")
-	for row_num, row in enumerate(dataset[dataset["SK_ID_CURR"]==_id].values):
+	for row_num, row in enumerate(dataset.values):
 		for col_num, column in enumerate(dataset.columns):
 			print("{}: {}".format(column, row[col_num]))
 		print("")
@@ -47,10 +47,10 @@ def optimize(training_data, validation_data, num_samples, training_count):
 	params["batch_size"] = [4096]	
 	params["epochs"] = [5]
 	params["num_layers"] = [4]
-	params["layer_size"] = [150, 300]
+	params["layer_size"] = [800]
 	params["lr_decay"] = [0.9]
 	params["pruning"] = [0.8]
-	params["target_weight"] = [5.0]
+	params["target_weight"] = [11.5]
 	
 	combinations = itertools.product(*params.values())
 	total_counts = len(list(combinations))
@@ -62,8 +62,6 @@ def optimize(training_data, validation_data, num_samples, training_count):
 		for index, param in enumerate(param_set):
 			param_dict[list(params.keys())[index]] = param
 		
-		if param_dict["reg"] > param_dict["rate"]:
-			continue
 		model = net(num_features = cols, 
 		   params = param_dict,
 		   verbose=False)
@@ -77,7 +75,7 @@ def optimize(training_data, validation_data, num_samples, training_count):
 		print("[{}/{}] Time Elapsed: {:d}s Training Loss: {:.4f} Validation Loss: {:.4f}".format(model_num+1, total_counts, int(time.time()-start), model.loss_history[-1], model.validation_loss[-1]))
 		
 		equal = model.target_accuracy > 0.6 and model.nontarget_accuracy > 0.6
-		reliable = model.nontarget_accuracy > 0.9 and model.target_accuracy > 0.2
+		reliable = model.nontarget_accuracy > 0.85 and model.target_accuracy > 0.3
 		if True or (equal or reliable) and model.performance > 1.2:
 			run_models({(param_dict["rate"], param_dict["reg"]): model}, validation_data, verbose = False)
 			equal = model.target_accuracy > 0.6 and model.nontarget_accuracy > 0.6
@@ -87,7 +85,6 @@ def optimize(training_data, validation_data, num_samples, training_count):
 				print("Correct Targets: {:.2f}%".format(100*model.target_accuracy))
 				print("Correct Nontargets: {:.2f}%".format(100*model.nontarget_accuracy))
 				print("=======================================")
-				optimization_models[param_set] = model
 		all_models[param_set] = model
 
 #This function accepts the raw data provided for the project and converts it into a format that can be consumed.
@@ -110,12 +107,12 @@ def fix_data(training_data, testing_data, validation_size = 0.1):
 					continue
 				if table[column].dtype != object:
 					data[f"flag_{column}"] = np.where((~data[column].isnull() & data[column] != 0), 1, 0)
-		data["total_debts"] = pd.merge(data[["SK_ID_CURR", "AMT_ANNUITY"]], tables["total_debts"].fillna(0), on="SK_ID_CURR", how ="left").iloc[:, 1:].sum(axis=1)
-		data["debt_to_income"] = data["total_debts"] / data["AMT_INCOME_TOTAL"]
+		data["total_annuities"] = pd.merge(data[["SK_ID_CURR", "AMT_ANNUITY"]], tables["total_annuities"].fillna(0), on="SK_ID_CURR", how ="left").iloc[:, 1:].sum(axis=1)
+		data["debt_to_income"] = data["total_annuities"] / data["AMT_INCOME_TOTAL"]
 		
 		data = data.drop(["SK_ID_CURR"], axis=1)
 		for column in data.columns:
-			if column == "TARGET":
+			if column == "TARGET" or column == "SK_ID_CURR":
 				continue
 			if data[column].dtype == object or (data[column].dtype == np.int64 and column[0:3] != "CNT" and column[0:4] != "DAYS"):
 				dummies.append(column)
@@ -131,8 +128,8 @@ def fix_data(training_data, testing_data, validation_size = 0.1):
 		
 	
 	cols = datasets["training_data"].columns.union(datasets["testing_data"].columns)
-	training_data = datasets["training_data"].reindex(cols, axis=1, fill_value=0)#.astype(np.float64)
-	testing_data = datasets["testing_data"].reindex(cols, axis=1, fill_value=0)#.astype(np.float64)
+	training_data = datasets["training_data"].reindex(cols, axis=1, fill_value=0).astype(np.float64)
+	testing_data = datasets["testing_data"].reindex(cols, axis=1, fill_value=0).astype(np.float64)
 	testing_data = testing_data.drop(columns=["TARGET"], axis=1)
 	
 	cutoff = int(len(training_data)* (1-validation_size))
@@ -174,32 +171,53 @@ class FieldCalcs:
 		tables["credit_loans"].columns = tables["credit_loans"].columns.droplevel(0)
 		tables["total_loans"] = data_previous.groupby(["SK_ID_CURR"], as_index=True)[["SK_ID_CURR"]].count()
 		tables["credit_loan_distribution"] = tables["credit_loans"] / tables["total_loans"].values
+		tables["uses_loan_insurance"] = data_previous.groupby(["SK_ID_CURR"], as_index=True)[["NFLAG_INSURED_ON_APPROVAL"]].sum().rename(columns = {"NFLAG_INSURED_ON_APPROVAL": "uses_insurance"})
+		tables["uses_loan_insurance"]["uses_insurance"] = np.where(tables["uses_loan_insurance"]["uses_insurance"] > 0, 1, 0)
 		
 		rejected_priors = data_previous[(data_previous["CODE_REJECT_REASON"] != "XAP") & (data_previous["CODE_REJECT_REASON"] != "XNA")]
 		
-		#merge the followingwF
+		#merge the following
 		tables["rejected_loans"] = rejected_priors.groupby(["SK_ID_CURR", "CODE_REJECT_REASON"], as_index=True)[["SK_ID_CURR"]].count().unstack(level=1).fillna(0)
 		tables["rejected_loans"].columns = tables["rejected_loans"].columns.droplevel(0)
 		tables["total_rejected_loans"] = rejected_priors.groupby(["SK_ID_CURR"], as_index=True)[["SK_ID_CURR"]].count()
 		tables["rejected_loan_distribution"] = tables["rejected_loans"] / tables["total_rejected_loans"].values
 		
+		tables["client_type"] = data_previous.groupby("SK_ID_CURR")[["DAYS_DECISION"]].max()
+		tables["client_type"] = tables["client_type"].merge(data_previous, on=["SK_ID_CURR", "DAYS_DECISION"], how="left").drop_duplicates(subset=["SK_ID_CURR", "DAYS_DECISION"])
+		tables["client_type"] = tables["client_type"][["SK_ID_CURR", "NAME_CLIENT_TYPE"]].set_index("SK_ID_CURR")
+		
+		for column in data_previous.dtypes[data_previous.dtypes == object].index:
+			if column in ["FLAG_LAST_APPL_PER_CONTRACT", "CODE_REJECT_REASON", "NAME_CLIENT_TYPE"]:
+				continue
+			col_lower = column.lower()
+			tables[col_lower] = data_previous.groupby(["SK_ID_CURR", column])[[column]].count().unstack(level=1)
+			tables[col_lower].columns = tables[col_lower].columns.droplevel(0)
+			tables[f"distribution_{col_lower}"] = tables[col_lower] / data_previous.groupby("SK_ID_CURR")[["SK_ID_CURR"]].count()
 		#============================================================
 	 	#=================== Debt to Income Ratio ===================
 	 	#============================================================
 		
 		bureau_debts = data_bureau[data_bureau["CREDIT_ACTIVE"] == "Active"]
+		bureau_debts.index = bureau_debts.SK_ID_BUREAU
+		bureau_debts = bureau_debts[(bureau_debts["AMT_CREDIT_SUM_DEBT"] > 0)]
+		
+		tables["bureau_debt_totals"] = bureau_debts.groupby(["SK_ID_CURR"])[["AMT_CREDIT_SUM_DEBT"]].sum()
+		
+		perpetuities = bureau_debts[(bureau_debts["AMT_CREDIT_SUM_DEBT"] > 0) & (bureau_debts["AMT_ANNUITY"] == 0)].set_index("SK_ID_BUREAU")
+		perpetuity_annuities = (perpetuities["AMT_CREDIT_SUM"] - perpetuities["AMT_CREDIT_SUM_DEBT"])/(perpetuities["DAYS_CREDIT"] / -30)
+		perpetuity_annuities = np.clip(perpetuity_annuities, a_min = 0, a_max = None)
+		bureau_debts.loc[perpetuities.index, "AMT_ANNUITY"] = perpetuity_annuities
+		
 		bureau_debts = bureau_debts.groupby("SK_ID_CURR")[["AMT_ANNUITY"]].sum()
 		
-		payments = data_cash.groupby(["SK_ID_CURR", "SK_ID_PREV"])[["MONTHS_BALANCE"]].max().reset_index()
-		prior_loans = pd.merge(payments, data_cash[["SK_ID_PREV", "NAME_CONTRACT_STATUS", "MONTHS_BALANCE"]], on=["SK_ID_PREV", "MONTHS_BALANCE"], how="left")
-		active_priors = prior_loans[prior_loans.NAME_CONTRACT_STATUS == "Active"]
-		#most_recent = data_payments.groupby(["SK_ID_PREV"])[["NUM_INSTALMENT_NUMBER"]].max()
-		#most_recent = pd.merge(most_recent, data_payments[["SK_ID_PREV", "NUM_INSTALMENT_NUMBER", "AMT_INSTALMENT"]], on=["SK_ID_PREV", "NUM_INSTALMENT_NUMBER"], how ="left")
-		
-		active_debts = pd.merge(active_priors, data_previous[["SK_ID_PREV", "AMT_ANNUITY"]], on="SK_ID_PREV", how="left")
+		#payments = data_cash.groupby(["SK_ID_CURR", "SK_ID_PREV"])[["MONTHS_BALANCE"]].max().reset_index()
+		#prior_loans = pd.merge(payments, data_cash[["SK_ID_PREV", "NAME_CONTRACT_STATUS", "MONTHS_BALANCE"]], on=["SK_ID_PREV", "MONTHS_BALANCE"], how="left")
+		#active_priors = prior_loans[prior_loans.NAME_CONTRACT_STATUS == "Active"]
+		active_debts = data_previous[data_previous.DAYS_TERMINATION > 0]
 		active_debts = active_debts.groupby(["SK_ID_CURR"])[["AMT_ANNUITY"]].sum()
-		 
-		tables["total_debts"] = pd.merge(bureau_debts, active_debts, on="SK_ID_CURR", how="outer")
+		
+		tables["total_annuities"] = pd.merge(bureau_debts, active_debts, on="SK_ID_CURR", how="outer")
+		
 		
 		#categorical_columns = [col_name for col_name in col_names if col_name[0:8] == "category"]
 		#results = pd.get_dummies(results, columns = categorical_columns)
@@ -244,11 +262,13 @@ def run_models(models, val_data, verbose = True):
 	return best_model
 
 #When a model is ready to run predictive analysis for final evaluation, this function will yield a csv containing applicant classifications.
-def print_submission(num, model, test_ids, test_data):
+def print_submission(model, test_ids, test_data):
 	test_data = convert_frame(test_data).float()
-	scores = model.get_accuracy(test_data, targets = None, test=True)[:, 0].tolist()
+	scores = model.get_accuracy(test_data, targets = None, test=True)
+	print(scores)
+	scores = scores[:, 0].tolist()
 	#scores = np.argmax(scores, axis=1)
-	file = open(r"F:\Studying\Python\Kaggle Competition\submission for model {}.csv".format(num), "w")
+	file = open(r"predictions.csv", "w")
 	file.write("SK_ID_CURR,TARGET\n")
 	for test_id, score in zip(test_ids, scores):
 		file.write("{},{}\n".format(test_id, score))
@@ -257,22 +277,22 @@ def print_submission(num, model, test_ids, test_data):
 
 
 #Raw data imports
-data_bureau = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\bureau.csv")
-data_balance = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\bureau_balance.csv")
-data_credit = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\credit_card_balance.csv")
-data_payments = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\installments_payments.csv")
-data_cash = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\POS_CASH_balance.csv")
-data_previous = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\previous_application.csv")
-data_train = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\application_train.csv")
-data_test = pd.read_csv(r"F:\Studying\Python\Kaggle Competition\application_test.csv")
+data_bureau = pd.read_csv(r"bureau.csv")
+data_balance = pd.read_csv(r"bureau_balance.csv")
+data_credit = pd.read_csv(r"credit_card_balance.csv")
+data_payments = pd.read_csv(r"installments_payments.csv")
+data_cash = pd.read_csv(r"POS_CASH_balance.csv")
+data_previous = pd.read_csv(r"previous_application.csv")
+data_train = pd.read_csv(r"application_train.csv")
+data_test = pd.read_csv(r"application_test.csv")
 
 
 #Final tables of parsed data inputs
 training_data, validation_data, testing_data, tables = fix_data(data_train, data_test, validation_size = 0.1)
-set_names = ["data_bureau", "data_balance", "data_credit", "data_payments", "data_cash", "data_previous"]
-datasets = [data_bureau, data_balance, data_credit, data_payments, data_cash, data_previous]
 
-usable_ids = []
+optimize(training_data.astype(np.float64), validation_data.astype(np.float64), 3, 20000)
+best_model = run_models(all_models, validation_data)
+print_submission(best_model, data_test.SK_ID_CURR, testing_data)
 
 #Tool for visually evaluating resulting models performance in training via graph
 def print_loss_graph(results, title):
