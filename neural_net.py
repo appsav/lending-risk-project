@@ -34,7 +34,7 @@ class net(nn.Module):
 		self.nontarget_accuracy = 0
 		self.performance = 0
 		#print(cols)
-		
+	
 		current_size = num_features
 		for number in np.arange(self.model_params["num_layers"]):
 			next_size = int(current_size * self.model_params["pruning"]) if self.model_params["pruning"] < 1.0 else self.model_params["layer_size"]

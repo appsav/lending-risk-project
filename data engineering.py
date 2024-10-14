@@ -9,6 +9,7 @@ import warnings
 import itertools
 import time
 from neural_net import net
+from sklearn.feature_selection import chi2
 
 warnings.filterwarnings('ignore')
 		
@@ -30,9 +31,7 @@ def convert_frame(frame):
 	frame = frame.astype(float)
 	return torch.tensor(frame.values, requires_grad=True)
 
-optimization_models = {}
 all_models = {}
-
 #This is a modular function for iterative exploration of hyperparameters. 
 #It outputs all the results to two separate dictionaries for graphing model performance and cherry picking best models.
 def optimize(training_data, validation_data, num_samples, training_count):
@@ -42,13 +41,13 @@ def optimize(training_data, validation_data, num_samples, training_count):
 	validation_subset = convert_frame(validation_subset.drop(["TARGET"], axis=1)).float()
 	
 	params = {}
-	params["rate"] = list(10**np.random.uniform(-3, -1, 5))
-	params["reg"] = list(10**np.random.uniform(-5, -3, 5))
-	params["batch_size"] = [4096]	
-	params["epochs"] = [5]
+	params["rate"] = list(10**np.random.uniform(-3, -1, 3))
+	params["reg"] = list(10**np.random.uniform(-5, -3, 3))
+	params["batch_size"] = [2048]	
+	params["epochs"] = [10]
 	params["num_layers"] = [4]
-	params["layer_size"] = [800]
-	params["lr_decay"] = [0.9]
+	params["layer_size"] = [50, 100, 150, 250]
+	params["lr_decay"] = [0.92]
 	params["pruning"] = [0.8]
 	params["target_weight"] = [11.5]
 	
@@ -227,26 +226,39 @@ class FieldCalcs:
 #==================================================
 
 #Out of the cherry picked models from the optimize() function, they will be evaluated for best performance on validation data.
-def run_models(models, val_data, verbose = True):
+def run_models(models, val_data, verbose = True, split_cnt = 1):
 	val_targets = val_data["TARGET"]
 	val_data = val_data.drop(["TARGET"], axis=1)
 	
 	val_targets = convert_frame(val_targets).long()
 	val_data = convert_frame(val_data).float()
 	
-	nontargets = sum(val_targets==0)
-	targets = sum(val_targets == 1)
+	
 	best_model = None
+	
+	data_splits = torch.tensor_split(val_data, split_cnt)
+	target_splits = torch.tensor_split(val_targets, split_cnt)
 
+	
 	for settings, model in models.items():
-		scores = model.get_accuracy(val_data, val_targets)
-		target_scores = sum(x > 0.5 and y == 1 for x, y in zip(scores[:, 0], val_targets))
-		nontarget_scores = sum(x < 0.5 and y == 0 for x, y in zip(scores[:, 0], val_targets))
-		#target_false_positives = torch.sum(x==1 and y == 0 for x,y in zip(torch.max(scores, dim=1)[1], val_targets))
-		#nontarget_false_negatives = torch.sum(x==0 and y == 1 for x,y in zip(torch.max(scores, dim=1)[1], val_targets))
-		model.target_accuracy = target_scores/targets
-		model.nontarget_accuracy = nontarget_scores/nontargets
-		model.performance = (target_scores/targets)+(nontarget_scores/nontargets)
+		target_accuracy = []
+		nontarget_accuracy = []
+		performance = []
+		split_sets = zip(data_splits, target_splits)
+		for val_data, val_targets in split_sets:
+			nontargets = sum(val_targets==0)
+			targets = sum(val_targets == 1)
+			scores = model.get_accuracy(val_data, val_targets)
+			target_scores = sum(x > 0.5 and y == 1 for x, y in zip(scores[:, 0], val_targets))
+			nontarget_scores = sum(x < 0.5 and y == 0 for x, y in zip(scores[:, 0], val_targets))
+		
+			target_accuracy.append(target_scores/targets)
+			nontarget_accuracy.append(nontarget_scores/nontargets)
+			performance.append((target_scores/targets)+(nontarget_scores/nontargets))
+			
+		model.target_accuracy = np.mean(target_accuracy)
+		model.nontarget_accuracy = np.mean(nontarget_accuracy)
+		model.performance = np.mean(performance)
 		if verbose: 
 			print("Target percentage: {:.2f}%".format(100*model.target_accuracy))
 			print("Nontarget percentage: {:.2f}%".format(100*model.nontarget_accuracy))
@@ -256,8 +268,8 @@ def run_models(models, val_data, verbose = True):
 		
 	if verbose: 
 		print("Best Results:")
-		print("Target Accuracy: {:.2f}%".format(best_model.target_accuracy))
-		print("Nontarget Accuracy: {:.2f}%".format(best_model.nontarget_accuracy))
+		print("Target Accuracy: {:.2f}%".format(100*best_model.target_accuracy))
+		print("Nontarget Accuracy: {:.2f}%".format(100*best_model.nontarget_accuracy))
 	
 	return best_model
 
@@ -287,12 +299,22 @@ data_train = pd.read_csv(r"application_train.csv")
 data_test = pd.read_csv(r"application_test.csv")
 
 
+
 #Final tables of parsed data inputs
 training_data, validation_data, testing_data, tables = fix_data(data_train, data_test, validation_size = 0.1)
 
-optimize(training_data.astype(np.float64), validation_data.astype(np.float64), 3, 20000)
-best_model = run_models(all_models, validation_data)
-print_submission(best_model, data_test.SK_ID_CURR, testing_data)
+
+
+chi2_results = chi2(training_data.drop("TARGET", axis =1).apply(lambda x: np.abs(x)).values, training_data.TARGET)
+drop_columns = training_data.drop("TARGET", axis = 1).columns[chi2_results[1] > 0.0001]
+training_selection = training_data.drop(drop_columns, axis=1)
+validation_selection = validation_data.drop(drop_columns, axis=1)
+testing_selection = testing_data.drop(drop_columns, axis=1)
+
+
+optimize(training_selection, validation_selection, 4, 20480)
+best_model = run_models(all_models, validation_selection, split_cnt = 3)
+print_submission(best_model, data_test.SK_ID_CURR, testing_selection)
 
 #Tool for visually evaluating resulting models performance in training via graph
 def print_loss_graph(results, title):
@@ -304,3 +326,10 @@ def print_loss_graph(results, title):
 		ax.plot(torch.tensor(model.loss_history).tolist(), color="tab:blue")
 		ax.plot(torch.tensor(model.validation_loss).tolist(), color="tab:orange")
 	fig
+	
+fig, ax = plt.subplots()
+ax.set_ylim([1,1.5])
+for params, model in all_models.items():
+    ax.plot([model.model_params["layer_size"]], [model.performance], "bo")
+ax.plot([200,1200], [1.23, 1.23], linestyle="-", linewidth=2)
+fig
